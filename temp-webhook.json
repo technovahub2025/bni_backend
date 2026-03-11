@@ -1,0 +1,21 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "changes": [
+        {
+          "value": {
+            "messages": [
+              {
+                "id": "wamid.test123",
+                "from": "919999999999",
+                "text": { "body": "test inbound message" }
+              }
+            ],
+            "statuses": []
+          }
+        }
+      ]
+    }
+  ]
+}
