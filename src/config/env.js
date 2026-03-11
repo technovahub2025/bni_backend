@@ -37,7 +37,8 @@ const env = {
   ),
   metaApiTimeoutMs: toPositiveNumber(process.env.META_API_TIMEOUT_MS, 20000),
   appBaseUrl,
-  membershipLink: cleanText(process.env.MEMBERSHIP_LINK, `${appBaseUrl}/apply`)
+  membershipLink: cleanText(process.env.MEMBERSHIP_LINK, `${appBaseUrl}/apply`),
+  zoomMeetingLink: cleanText(process.env.ZOOM_MEETING_LINK, "")
 };
 
 module.exports = env;

@@ -2,7 +2,7 @@ const axios = require("axios");
 const env = require("../config/env");
 const Message = require("../models/Message");
 const { logActivity } = require("./logService");
-const { fetchMetaTemplates } = require("./metaTemplateService");
+const { findMetaTemplateByName } = require("./metaTemplateService");
 const { getMessagingConfig } = require("./workspaceSettingsService");
 
 async function createOutboundMessage(leadId, templateName, body = "") {
@@ -15,8 +15,25 @@ async function createOutboundMessage(leadId, templateName, body = "") {
   });
 }
 
+function getFlowButton(templateDoc) {
+  const templateComponents = Array.isArray(templateDoc?.components) ? templateDoc.components : [];
+  const buttonsComponent = templateComponents.find((component) => component.type === "BUTTONS");
+  const button = (buttonsComponent?.buttons || []).find(
+    (item) => String(item?.type || "").toUpperCase() === "FLOW"
+  );
+  return button || null;
+}
+
 function getExpectedParamCount(templateDoc) {
   if (!templateDoc) return 0;
+  const variableMappings = Array.isArray(templateDoc.variableMappings) ? templateDoc.variableMappings : [];
+  if (variableMappings.length > 0) {
+    const indexed = variableMappings
+      .map((item) => /^var_(\d+)$/i.exec(String(item.variable)))
+      .filter(Boolean)
+      .map((match) => Number(match[1]));
+    if (indexed.length > 0) return Math.max(...indexed);
+  }
   const variables = Array.isArray(templateDoc.variables) ? templateDoc.variables : [];
   if (variables.length > 0) {
     const indexed = variables
@@ -44,6 +61,77 @@ function buildTemplateParameters(lead, count) {
   return params;
 }
 
+function buildComponentAwareParameters(lead, templateDoc, templateParams) {
+  const variableMappings = Array.isArray(templateDoc?.variableMappings) ? templateDoc.variableMappings : [];
+  const templateComponents = Array.isArray(templateDoc?.components) ? templateDoc.components : [];
+  const flowButtons = templateComponents
+    .filter((component) => component.type === "BUTTONS")
+    .flatMap((component) =>
+      (component.buttons || []).map((button, buttonIndex) => ({
+        button,
+        buttonIndex
+      }))
+    )
+    .filter(({ button }) => String(button?.type || "").toUpperCase() === "FLOW")
+    .map(({ buttonIndex }) => ({
+      type: "button",
+      sub_type: "flow",
+      index: String(buttonIndex),
+      parameters: [
+        {
+          type: "action",
+          action: {
+            flow_token: `flow_${lead._id}_${Date.now()}`,
+            flow_action_data: {}
+          }
+        }
+      ]
+    }));
+
+  if (!variableMappings.length) return flowButtons;
+
+  const provided = Array.isArray(templateParams) ? templateParams.map((value) => String(value || "")) : [];
+  const defaults = buildTemplateParameters(lead, getExpectedParamCount(templateDoc)).map((item) => item.text);
+  const byVariable = new Map();
+
+  variableMappings.forEach((mapping) => {
+    const match = /^var_(\d+)$/i.exec(String(mapping.variable));
+    const index = match ? Number(match[1]) - 1 : byVariable.size;
+    if (!byVariable.has(mapping.variable)) {
+      byVariable.set(mapping.variable, provided[index] || defaults[index] || `value_${index + 1}`);
+    }
+  });
+
+  const bodyParams = variableMappings
+    .filter((mapping) => mapping.componentType === "body")
+    .sort((a, b) => Number(a.variable.split("_")[1] || 0) - Number(b.variable.split("_")[1] || 0))
+    .map((mapping) => ({ type: "text", text: byVariable.get(mapping.variable) || "" }));
+
+  const buttonGroups = new Map();
+  variableMappings
+    .filter((mapping) => mapping.componentType === "button")
+    .forEach((mapping) => {
+      const key = `${mapping.subType}:${mapping.buttonIndex}`;
+      const existing = buttonGroups.get(key) || {
+        type: "button",
+        sub_type: mapping.subType || "url",
+        index: String(mapping.buttonIndex || 0),
+        parameters: []
+      };
+      existing.parameters.push({ type: "text", text: byVariable.get(mapping.variable) || "" });
+      buttonGroups.set(key, existing);
+    });
+
+  const components = [];
+  if (bodyParams.length) {
+    components.push({ type: "body", parameters: bodyParams });
+  }
+
+  components.push(...Array.from(buttonGroups.values()));
+  components.push(...flowButtons);
+  return components;
+}
+
 function buildTemplateParametersFromInput(lead, count, providedParams) {
   const provided = Array.isArray(providedParams) ? providedParams.map((v) => String(v || "")) : [];
   if (count <= 0) {
@@ -62,7 +150,8 @@ function createTemplatePayload({
   templateName,
   language,
   templateParams,
-  expectedParamCount = 0
+  expectedParamCount = 0,
+  templateDoc = null
 }) {
   const providedCount = Array.isArray(templateParams) ? templateParams.length : 0;
   const paramsToSend = Math.max(expectedParamCount || 0, providedCount || 0);
@@ -77,7 +166,10 @@ function createTemplatePayload({
     }
   };
 
-  if (paramsToSend > 0) {
+  const componentAwareParameters = buildComponentAwareParameters(lead, templateDoc, templateParams);
+  if (componentAwareParameters.length > 0) {
+    payload.template.components = componentAwareParameters;
+  } else if (paramsToSend > 0) {
     payload.template.components = [
       {
         type: "body",
@@ -85,6 +177,40 @@ function createTemplatePayload({
       }
     ];
   }
+
+  return payload;
+}
+
+function createInteractiveFlowPayload({ lead, templateDoc }) {
+  const flowButton = getFlowButton(templateDoc);
+  if (!flowButton) return null;
+
+  const parameters = {
+    flow_message_version: "3",
+    flow_token: `flow_${lead._id}_${Date.now()}`,
+    flow_id: String(flowButton.flow_id),
+    flow_cta: String(flowButton.text || "Open flow")
+  };
+
+  if (flowButton.flow_action) {
+    parameters.flow_action = String(flowButton.flow_action).toLowerCase();
+  }
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to: lead.phone,
+    type: "interactive",
+    interactive: {
+      type: "flow",
+      body: {
+        text: String(templateDoc?.body || "").trim()
+      },
+      action: {
+        name: "flow",
+        parameters
+      }
+    }
+  };
 
   return payload;
 }
@@ -102,20 +228,7 @@ function isTranslationError(error) {
 
 async function resolveTemplateDoc(templateName) {
   try {
-    const messaging = await getMessagingConfig();
-    const metaTemplates = await fetchMetaTemplates();
-    const preferred =
-      metaTemplates.find(
-        (template) =>
-          template.name === templateName &&
-          template.language === messaging.templateLanguage &&
-          template.status === "APPROVED"
-      ) ||
-      metaTemplates.find(
-        (template) => template.name === templateName && template.status === "APPROVED"
-      ) ||
-      metaTemplates.find((template) => template.name === templateName);
-    return preferred || null;
+    return await findMetaTemplateByName(templateName);
   } catch {
     return null;
   }
@@ -128,6 +241,9 @@ async function sendTemplateMessage({ lead, templateName, bodyFallback = "", temp
   const templateDoc = await resolveTemplateDoc(templateName);
   const expectedParamCount = getExpectedParamCount(templateDoc);
   const selectedLanguage = templateDoc?.language || messaging.templateLanguage;
+  const flowPayload = getFlowButton(templateDoc)
+    ? createInteractiveFlowPayload({ lead, templateDoc })
+    : null;
 
   if (!messaging.accessToken || !messaging.phoneNumberId) {
     messageDoc.status = "sent";
@@ -139,13 +255,16 @@ async function sendTemplateMessage({ lead, templateName, bodyFallback = "", temp
   }
 
   try {
-    const payload = createTemplatePayload({
-      lead,
-      templateName,
-      language: selectedLanguage,
-      templateParams,
-      expectedParamCount
-    });
+    const payload =
+      flowPayload ||
+      createTemplatePayload({
+        lead,
+        templateName,
+        language: selectedLanguage,
+        templateParams,
+        expectedParamCount,
+        templateDoc
+      });
 
     const { data } = await axios.post(endpoint, payload, {
       headers: {
@@ -170,7 +289,8 @@ async function sendTemplateMessage({ lead, templateName, bodyFallback = "", temp
           templateName,
           language: templateDoc.language,
           templateParams,
-          expectedParamCount
+          expectedParamCount,
+          templateDoc
         });
 
         const { data } = await axios.post(endpoint, translationRetryPayload, {
@@ -205,7 +325,8 @@ async function sendTemplateMessage({ lead, templateName, bodyFallback = "", temp
           templateName,
           language: selectedLanguage,
           templateParams,
-          expectedParamCount: expectedFromError
+          expectedParamCount: expectedFromError,
+          templateDoc
         });
 
         const { data } = await axios.post(endpoint, retryPayload, {

@@ -1,11 +1,7 @@
 const mongoose = require("mongoose");
 const Lead = require("../models/Lead");
-const Workflow = require("../models/Workflow");
 const { logActivity } = require("../services/logService");
 const { startWorkflow } = require("../services/workflowService");
-const { sendTemplateMessage } = require("../services/whatsappService");
-
-const DEFAULT_APPLICATION_SUBMITTED_TEMPLATE = "whatsapp_automation_request_info";
 
 function normalizePhone(phone = "") {
   return String(phone).replace(/[^\d+]/g, "");
@@ -117,46 +113,11 @@ async function submitApplication(req, res) {
   lead.stage = "conversation";
   await lead.save();
 
-  const workflow = await Workflow.findOne({ name: "default_nurture_workflow" }).lean();
-  const settings = {
-    applicationSubmittedTemplate: DEFAULT_APPLICATION_SUBMITTED_TEMPLATE,
-    ...(workflow?.settings || {})
-  };
-
   await logActivity("application_submitted", { email: application.email, city: application.city }, lead._id);
-  let notification = {
-    sent: false,
-    error: null
-  };
-
-  try {
-    await sendTemplateMessage({
-      lead,
-      templateName: settings.applicationSubmittedTemplate,
-      bodyFallback: "Our team will contact you soon."
-    });
-    notification.sent = true;
-  } catch (error) {
-    notification.error =
-      error?.response?.data?.error?.message ||
-      error?.response?.data?.error?.error_user_msg ||
-      error.message ||
-      "Failed to send application confirmation";
-
-    await logActivity(
-      "application_confirmation_send_failed",
-      {
-        templateName: settings.applicationSubmittedTemplate,
-        error: notification.error
-      },
-      lead._id
-    );
-  }
 
   res.json({
     ok: true,
     lead,
-    notification,
     application: lead.customFields?.application || null
   });
 }

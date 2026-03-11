@@ -5,6 +5,56 @@ const { handleInboundReply } = require("../services/workflowService");
 const { logActivity } = require("../services/logService");
 const { getMessagingConfig } = require("../services/workspaceSettingsService");
 
+function parseFlowReply(inbound) {
+  const flowReply = inbound?.interactive?.nfm_reply;
+  if (!flowReply) {
+    return { body: "", buttonPayload: "", selectedMeetingTime: "", isFlowReply: false };
+  }
+
+  const rawResponseJson = flowReply?.response_json;
+  const responseJson =
+    typeof rawResponseJson === "string"
+      ? rawResponseJson
+      : rawResponseJson && typeof rawResponseJson === "object"
+        ? JSON.stringify(rawResponseJson)
+        : "";
+
+  const parsedResponse =
+    typeof rawResponseJson === "string"
+      ? (() => {
+          try {
+            return JSON.parse(rawResponseJson);
+          } catch {
+            return null;
+          }
+        })()
+      : rawResponseJson && typeof rawResponseJson === "object"
+        ? rawResponseJson
+        : null;
+
+  const firstUsefulValue =
+    parsedResponse && typeof parsedResponse === "object"
+      ? Object.entries(parsedResponse).find(([key, value]) => {
+          if (key === "flow_token") return false;
+          return value !== undefined && value !== null && String(value).trim();
+        })?.[1]
+      : "";
+
+  return {
+    body:
+      String(flowReply?.body || "").trim() ||
+      String(firstUsefulValue || "").trim() ||
+      responseJson,
+    buttonPayload:
+      String(firstUsefulValue || "").trim() ||
+      String(flowReply?.body || "").trim() ||
+      String(flowReply?.name || "").trim() ||
+      responseJson,
+    selectedMeetingTime: String(firstUsefulValue || "").trim(),
+    isFlowReply: true
+  };
+}
+
 function extractWebhookData(payload) {
   const entries = Array.isArray(payload?.entry) ? payload.entry : [];
   const values = entries.flatMap((entry) =>
@@ -40,7 +90,23 @@ async function handleWebhook(req, res) {
 
   for (const inbound of messages) {
     const from = (inbound.from || "").replace(/[^\d+]/g, "");
-    const body = inbound?.text?.body || "";
+    const flowReply = parseFlowReply(inbound);
+    const body =
+      inbound?.text?.body ||
+      inbound?.button?.text ||
+      inbound?.interactive?.button_reply?.title ||
+      inbound?.interactive?.list_reply?.title ||
+      flowReply.body ||
+      "";
+    const buttonPayload =
+      inbound?.interactive?.button_reply?.id ||
+      inbound?.interactive?.button_reply?.title ||
+      inbound?.button?.payload ||
+      inbound?.button?.text ||
+      inbound?.interactive?.list_reply?.id ||
+      inbound?.interactive?.list_reply?.title ||
+      flowReply.buttonPayload ||
+      "";
     let lead = await Lead.findOne({ phone: from });
     if (!lead && from) {
       lead = await Lead.create({
@@ -68,7 +134,12 @@ async function handleWebhook(req, res) {
       await logActivity("stop_opt_out", { body }, lead._id);
     }
 
-    await handleInboundReply(lead, body);
+    await handleInboundReply(lead, {
+      body,
+      buttonPayload,
+      selectedMeetingTime: flowReply.selectedMeetingTime,
+      isFlowReply: flowReply.isFlowReply
+    });
   }
 
   res.sendStatus(200);

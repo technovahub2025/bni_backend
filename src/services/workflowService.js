@@ -25,6 +25,14 @@ const DEFAULT_TEMPLATE_CONFIG = {
   keywordReplyScore: 50
 };
 
+const DEFAULT_REPLY_FLOW_CONFIG = {
+  initialTemplate: "",
+  initialTemplateVariables: [],
+  steps: []
+};
+
+const DEFAULT_TEMPLATE_VARIABLE_SOURCE = "lead_name";
+
 const localTimerRefs = new Map();
 
 function toDelayMs(value, unit) {
@@ -110,6 +118,125 @@ function resolveTemplateConfig(workflowOrRun) {
   };
 }
 
+function normalizeReplyFlowConfig(replyFlow = null) {
+  const normalizeTemplateVariables = (variables = []) =>
+    (Array.isArray(variables) ? variables : []).map((item, index) => ({
+      variable: String(item?.variable || `var_${index + 1}`),
+      source: [
+        "lead_name",
+        "application_form_link",
+        "zoom_meeting_link",
+        "lead_phone",
+        "selected_meeting_time"
+      ].includes(item?.source)
+        ? item.source
+        : DEFAULT_TEMPLATE_VARIABLE_SOURCE
+    }));
+
+  const steps = Array.isArray(replyFlow?.steps)
+    ? replyFlow.steps.map((step, index) => ({
+        id: String(step?.id || `step_${index + 1}`),
+        triggerType: step?.triggerType === "button_click" ? "button_click" : "user_reply",
+        triggerValue: String(step?.triggerValue || "").trim(),
+        nextTemplate: String(step?.nextTemplate || "").trim(),
+        nextTemplateVariables: normalizeTemplateVariables(step?.nextTemplateVariables)
+      }))
+    : [];
+
+  return {
+    ...DEFAULT_REPLY_FLOW_CONFIG,
+    initialTemplate: String(replyFlow?.initialTemplate || "").trim(),
+    initialTemplateVariables: normalizeTemplateVariables(replyFlow?.initialTemplateVariables),
+    steps
+  };
+}
+
+function normalizeWorkflow(workflow) {
+  return {
+    ...workflow,
+    type: workflow?.type || "nurture",
+    settings: {
+      ...DEFAULT_TEMPLATE_CONFIG,
+      ...(workflow?.settings || {})
+    },
+    replyFlow: normalizeReplyFlowConfig(workflow?.replyFlow)
+  };
+}
+
+function matchesReplyFlowTrigger(step, inboundPayload) {
+  const expected = String(step?.triggerValue || "").trim().toLowerCase();
+  if (!expected) return false;
+
+  const actualSource =
+    step?.triggerType === "button_click"
+      ? inboundPayload?.buttonPayload || inboundPayload?.body
+      : inboundPayload?.body;
+
+  if (expected === "__flow_reply__") {
+    return !!inboundPayload?.isFlowReply && String(actualSource || "").trim().length > 0;
+  }
+
+  if (expected === "__any__") {
+    return String(actualSource || "").trim().length > 0;
+  }
+
+  return String(actualSource || "").trim().toLowerCase() === expected;
+}
+
+function findMatchingReplyFlowStep(steps, inboundPayload) {
+  return (Array.isArray(steps) ? steps : []).find((step) => matchesReplyFlowTrigger(step, inboundPayload)) || null;
+}
+
+function resolveTemplateVariableValue(source, lead, inboundPayload = null) {
+  if (source === "application_form_link") {
+    return buildApplicationLink(lead);
+  }
+  if (source === "zoom_meeting_link") {
+    return String(lead?.customFields?.zoomMeetingLink || env.zoomMeetingLink || "").trim();
+  }
+  if (source === "lead_phone") {
+    return String(lead?.phone || "").trim();
+  }
+  if (source === "selected_meeting_time") {
+    return String(
+      inboundPayload?.selectedMeetingTime ||
+        inboundPayload?.buttonPayload ||
+        inboundPayload?.body ||
+        ""
+    ).trim();
+  }
+  return String(lead?.name || "").trim();
+}
+
+function resolveTemplateParams(bindings, lead, inboundPayload = null) {
+  return (Array.isArray(bindings) ? bindings : []).map((binding) =>
+    resolveTemplateVariableValue(binding?.source, lead, inboundPayload)
+  );
+}
+
+function resolveReplyFlowTemplateParams(templateName, bindings, lead, inboundPayload = null) {
+  const normalizedTemplateName = String(templateName || "").trim().toLowerCase();
+  const normalizedBindings = Array.isArray(bindings) ? bindings : [];
+  const isApplicationLinkTemplate =
+    normalizedTemplateName === "membership_application_template" ||
+    normalizedTemplateName.includes("application_form") ||
+    (normalizedTemplateName.includes("application") && normalizedTemplateName.includes("link"));
+
+  if (isApplicationLinkTemplate && normalizedBindings.length === 0) {
+    return [resolveTemplateVariableValue("application_form_link", lead, inboundPayload)];
+  }
+
+  if (
+    isApplicationLinkTemplate &&
+    normalizedBindings.length === 1 &&
+    normalizedBindings[0]?.source === "lead_name"
+  ) {
+    return [resolveTemplateVariableValue("application_form_link", lead, inboundPayload)];
+  }
+
+  return resolveTemplateParams(normalizedBindings, lead, inboundPayload);
+}
+
 async function cancelPendingJobs(runId) {
   const jobs = await ScheduledJob.find({ runId });
   await Promise.all(
@@ -169,7 +296,7 @@ async function initializeLocalScheduler() {
   pendingJobs.forEach((job) => scheduleLocalTimer(job));
 }
 
-async function startWorkflow(leadId) {
+async function startWorkflow(leadId, workflowId = null, options = {}) {
   const lead = await Lead.findById(leadId);
   if (!lead) {
     const error = new Error("Lead not found");
@@ -185,12 +312,57 @@ async function startWorkflow(leadId) {
   const activeRun = await WorkflowRun.findOne({ leadId, state: "running" });
   if (activeRun) return activeRun;
 
-  const workflow = await ensureDefaultWorkflow();
+  const workflow = workflowId
+    ? await Workflow.findById(workflowId)
+    : await ensureDefaultWorkflow();
+  if (!workflow) {
+    const error = new Error("Workflow not found");
+    error.status = 404;
+    throw error;
+  }
   if (!workflow.active) {
     const error = new Error("Workflow is inactive");
     error.status = 400;
     throw error;
   }
+
+  const normalizedWorkflow = normalizeWorkflow(workflow.toObject ? workflow.toObject() : workflow);
+
+  if (normalizedWorkflow.type === "reply_flow") {
+    if (!normalizedWorkflow.replyFlow.initialTemplate) {
+      const error = new Error("Reply workflow initial template is required");
+      error.status = 400;
+      throw error;
+    }
+
+    const run = await WorkflowRun.create({
+      workflowId: workflow._id,
+      leadId,
+      currentStep: "awaiting_initial_reply",
+      currentStepIndex: -1,
+      state: "running"
+    });
+
+    lead.status = "nurturing";
+    await lead.save();
+
+    if (!options.deferInitialReplyFlowSend) {
+      await sendInitialReplyFlowTemplate({ lead, workflow: normalizedWorkflow, run });
+    }
+
+    await logActivity(
+      "reply_workflow_started",
+      {
+        workflowId: String(workflow._id),
+        templateName: normalizedWorkflow.replyFlow.initialTemplate,
+        mode: options.deferInitialReplyFlowSend ? "send_initial_on_inbound_message" : "send_initial_immediately"
+      },
+      leadId,
+      run._id
+    );
+    return run;
+  }
+
   const run = await WorkflowRun.create({
     workflowId: workflow._id,
     leadId,
@@ -213,6 +385,59 @@ async function startWorkflow(leadId) {
   return run;
 }
 
+async function findAutoReplyWorkflow() {
+  const workflow = await Workflow.findOne({ type: "reply_flow", active: true })
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .lean();
+
+  return workflow ? normalizeWorkflow(workflow) : null;
+}
+
+async function resolveInboundWorkflowRun(lead) {
+  const activeRun = await WorkflowRun.findOne({ leadId: lead._id, state: "running" }).sort({ createdAt: -1 });
+  const autoReplyWorkflow = await findAutoReplyWorkflow();
+
+  if (activeRun) {
+    const activeWorkflow = await Workflow.findById(activeRun.workflowId).lean();
+    const normalizedActiveWorkflow = activeWorkflow ? normalizeWorkflow(activeWorkflow) : null;
+
+    if (normalizedActiveWorkflow?.type === "reply_flow") {
+      return activeRun;
+    }
+
+    if (normalizedActiveWorkflow?.type === "nurture" && autoReplyWorkflow) {
+      await markRunStopped(activeRun, "switched_to_reply_workflow");
+      const replyRun = await startWorkflow(lead._id, String(autoReplyWorkflow._id), {
+        deferInitialReplyFlowSend: true
+      });
+      await logActivity(
+        "reply_workflow_took_over_inbound",
+        { previousWorkflowId: String(activeRun.workflowId), workflowId: String(autoReplyWorkflow._id) },
+        lead._id,
+        replyRun._id
+      );
+      return replyRun;
+    }
+
+    return activeRun;
+  }
+
+  if (autoReplyWorkflow) {
+    const replyRun = await startWorkflow(lead._id, String(autoReplyWorkflow._id), {
+      deferInitialReplyFlowSend: true
+    });
+    await logActivity(
+      "reply_workflow_auto_started_on_inbound",
+      { workflowId: String(autoReplyWorkflow._id) },
+      lead._id,
+      replyRun._id
+    );
+    return replyRun;
+  }
+
+  return null;
+}
+
 async function markRunStopped(run, reason) {
   run.state = "stopped";
   await run.save();
@@ -228,7 +453,7 @@ async function markRunCompleted(run, reason) {
 }
 
 function buildApplicationLink(lead) {
-  const baseUrl = env.membershipLink || `${env.appBaseUrl}/apply`;
+  const baseUrl = `${env.appBaseUrl}/apply`;
   const url = new URL(baseUrl);
   url.searchParams.set("leadId", String(lead._id));
   if (lead.phone) {
@@ -241,18 +466,11 @@ function buildApplicationLink(lead) {
 }
 
 async function qualifyLead(lead, run) {
-  const templates = resolveTemplateConfig(run);
   const applicationLink = buildApplicationLink(lead);
   lead.status = "qualified";
   lead.stage = "application";
   await lead.save();
   await logActivity("meeting_reminder_hook", { leadStage: "application", applicationLink }, lead._id, run._id);
-  await sendTemplateMessage({
-    lead,
-    templateName: templates.membershipTemplate,
-    bodyFallback: `Apply here: ${applicationLink}`,
-    templateParams: [applicationLink]
-  });
   await markRunCompleted(run, "lead_qualified");
 }
 
@@ -262,9 +480,106 @@ async function disqualifyLead(lead, run, reason = "score_below_threshold") {
   await markRunStopped(run, reason);
 }
 
-async function handleInboundReply(lead, inboundBody) {
-  const run = await WorkflowRun.findOne({ leadId: lead._id, state: "running" }).sort({ createdAt: -1 });
+async function sendInitialReplyFlowTemplate({ lead, workflow, run }) {
+  await sendTemplateMessage({
+    lead,
+    templateName: workflow.replyFlow.initialTemplate,
+    bodyFallback: "Hello from workflow",
+      templateParams: resolveReplyFlowTemplateParams(
+        workflow.replyFlow.initialTemplate,
+        workflow.replyFlow.initialTemplateVariables,
+        lead,
+        null
+      )
+  });
+
+  run.currentStepIndex = 0;
+  run.currentStep = "awaiting_reply_selection";
+  await run.save();
+
+  await logActivity(
+    "reply_workflow_initial_template_sent",
+    {
+      workflowId: String(workflow._id),
+      templateName: workflow.replyFlow.initialTemplate
+    },
+    lead._id,
+    run._id
+  );
+}
+
+async function handleInboundReply(lead, inboundPayload) {
+  const run = await resolveInboundWorkflowRun(lead);
   if (!run) return;
+
+  const workflow = await Workflow.findById(run.workflowId).lean();
+  if (!workflow) return;
+
+  const normalizedWorkflow = normalizeWorkflow(workflow);
+
+  if (normalizedWorkflow.type === "reply_flow") {
+    const inboundBody = inboundPayload?.body || "";
+
+    if (/\bstop\b/i.test(inboundBody)) {
+      lead.optOut = true;
+      lead.status = "unqualified";
+      await lead.save();
+      await markRunStopped(run, "stop_keyword");
+      return;
+    }
+
+    if (run.currentStepIndex < 0) {
+      await sendInitialReplyFlowTemplate({ lead, workflow: normalizedWorkflow, run });
+      return;
+    }
+
+    const step = findMatchingReplyFlowStep(
+      normalizedWorkflow.replyFlow.steps.slice(Math.max(0, run.currentStepIndex)),
+      inboundPayload
+    );
+    if (!step) {
+      return;
+    }
+
+    const matchedStepIndex = normalizedWorkflow.replyFlow.steps.findIndex((item) => item.id === step.id);
+
+    await sendTemplateMessage({
+      lead,
+      templateName: step.nextTemplate,
+      bodyFallback: "Workflow reply step",
+      templateParams: resolveReplyFlowTemplateParams(
+        step.nextTemplate,
+        step.nextTemplateVariables,
+        lead,
+        inboundPayload
+      )
+    });
+
+    run.currentStepIndex = matchedStepIndex + 1;
+    run.currentStep = `reply_step_${run.currentStepIndex}`;
+    await run.save();
+
+    await logActivity(
+      "reply_workflow_step_advanced",
+      {
+        workflowId: String(workflow._id),
+        triggerType: step.triggerType,
+        triggerValue: step.triggerValue,
+        nextTemplate: step.nextTemplate,
+        nextStepIndex: run.currentStepIndex
+      },
+      lead._id,
+      run._id
+    );
+
+    if (run.currentStepIndex >= normalizedWorkflow.replyFlow.steps.length) {
+      await markRunCompleted(run, "reply_workflow_completed");
+    }
+
+    return;
+  }
+
+  const inboundBody = inboundPayload?.body || "";
   const workflowSettings = resolveTemplateConfig(run);
 
   await cancelPendingJobs(run._id);
@@ -346,13 +661,41 @@ async function stopWorkflowForLead(leadId, reason = "manual_stop") {
   return run;
 }
 
+async function deleteWorkflow(workflowId) {
+  const workflow = await Workflow.findById(workflowId);
+  if (!workflow) {
+    const error = new Error("Workflow not found");
+    error.status = 404;
+    throw error;
+  }
+
+  const runs = await WorkflowRun.find({ workflowId });
+  await Promise.all(
+    runs.map(async (run) => {
+      await cancelPendingJobs(run._id);
+    })
+  );
+
+  await WorkflowRun.deleteMany({ workflowId });
+  await Workflow.deleteOne({ _id: workflowId });
+
+  return workflow;
+}
+
 module.exports = {
   ensureDefaultWorkflow,
   initializeLocalScheduler,
   startWorkflow,
+  findAutoReplyWorkflow,
+  resolveInboundWorkflowRun,
   processScheduledJob,
   handleInboundReply,
   cancelPendingJobs,
   stopWorkflowForLead,
-  DEFAULT_TEMPLATE_CONFIG
+  deleteWorkflow,
+  DEFAULT_TEMPLATE_CONFIG,
+  DEFAULT_REPLY_FLOW_CONFIG,
+  normalizeReplyFlowConfig,
+  normalizeWorkflow,
+  resolveTemplateParams
 };

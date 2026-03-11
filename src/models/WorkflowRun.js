@@ -19,6 +19,7 @@ const WorkflowRunSchema = new mongoose.Schema(
       template3DelayUnit: { type: String, enum: ["minutes", "hours", "days"], default: "hours" },
       membershipTemplate: { type: String, default: "membership_application_template" }
     },
+    currentStepIndex: { type: Number, default: 0 },
     state: {
       type: String,
       enum: ["running", "completed", "stopped"],
