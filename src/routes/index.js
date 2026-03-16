@@ -8,6 +8,8 @@ const inboxRoutes = require("./inboxRoutes");
 const publicRoutes = require("./publicRoutes");
 const reportsRoutes = require("./reportsRoutes");
 const settingsRoutes = require("./settingsRoutes");
+const meetingsRoutes = require("./meetingsRoutes");
+const notificationsRoutes = require("./notificationsRoutes");
 
 const router = express.Router();
 
@@ -20,5 +22,7 @@ router.use("/inbox", inboxRoutes);
 router.use("/public", publicRoutes);
 router.use("/reports", reportsRoutes);
 router.use("/settings", settingsRoutes);
+router.use("/meetings", meetingsRoutes);
+router.use("/notifications", notificationsRoutes);
 
 module.exports = router;

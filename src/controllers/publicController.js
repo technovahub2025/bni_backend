@@ -1,7 +1,10 @@
 const mongoose = require("mongoose");
 const Lead = require("../models/Lead");
+const Workflow = require("../models/Workflow");
+const WorkflowRun = require("../models/WorkflowRun");
 const { logActivity } = require("../services/logService");
-const { startWorkflow } = require("../services/workflowService");
+const { startWorkflow, resolveTemplateConfig, DEFAULT_TEMPLATE_CONFIG } = require("../services/workflowService");
+const { sendTemplateMessage } = require("../services/whatsappService");
 
 function normalizePhone(phone = "") {
   return String(phone).replace(/[^\d+]/g, "");
@@ -114,6 +117,29 @@ async function submitApplication(req, res) {
   await lead.save();
 
   await logActivity("application_submitted", { email: application.email, city: application.city }, lead._id);
+
+  const latestRun = await WorkflowRun.findOne({ leadId: lead._id }).sort({ createdAt: -1 }).lean();
+  const defaultWorkflow = latestRun
+    ? null
+    : await Workflow.findOne({ name: "default_nurture_workflow" }).lean();
+  const templateConfig = latestRun
+    ? resolveTemplateConfig(latestRun)
+    : defaultWorkflow
+      ? resolveTemplateConfig(defaultWorkflow)
+      : DEFAULT_TEMPLATE_CONFIG;
+
+  if (templateConfig.applicationSubmittedTemplate) {
+    await sendTemplateMessage({
+      lead,
+      templateName: templateConfig.applicationSubmittedTemplate,
+      bodyFallback: "Your application has been received. Our team will contact you soon."
+    });
+    await logActivity(
+      "application_confirmation_sent",
+      { templateName: templateConfig.applicationSubmittedTemplate },
+      lead._id
+    );
+  }
 
   res.json({
     ok: true,

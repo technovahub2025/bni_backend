@@ -5,6 +5,9 @@ const Message = require("../models/Message");
 const WorkflowRun = require("../models/WorkflowRun");
 const ScheduledJob = require("../models/ScheduledJob");
 const ActivityLog = require("../models/ActivityLog");
+const LeadNote = require("../models/LeadNote");
+const Meeting = require("../models/Meeting");
+const Notification = require("../models/Notification");
 const { logActivity } = require("../services/logService");
 const { redisQueueEnabled } = require("../queues/workflowQueue");
 const { stopWorkflowForLead } = require("../services/workflowService");
@@ -95,11 +98,12 @@ async function getLeads(req, res) {
 async function getLeadById(req, res) {
   const lead = await Lead.findById(req.params.id).lean();
   if (!lead) return res.status(404).json({ error: "Lead not found" });
-  const [messages, runs, scheduledJobs, activityLogs] = await Promise.all([
+  const [messages, runs, scheduledJobs, activityLogs, notes] = await Promise.all([
     Message.find({ leadId: lead._id }).sort({ createdAt: 1 }).lean(),
     WorkflowRun.find({ leadId: lead._id }).sort({ createdAt: -1 }).lean(),
     ScheduledJob.find({ leadId: lead._id }).sort({ executeAt: 1 }).lean(),
-    ActivityLog.find({ leadId: lead._id }).sort({ createdAt: -1 }).limit(100).lean()
+    ActivityLog.find({ leadId: lead._id }).sort({ createdAt: -1 }).limit(100).lean(),
+    LeadNote.find({ leadId: lead._id }).sort({ createdAt: -1 }).limit(50).lean()
   ]);
   res.json({
     ...lead,
@@ -107,10 +111,36 @@ async function getLeadById(req, res) {
     workflowRuns: runs,
     scheduledJobs,
     activityLogs,
+    notes,
     runtime: {
       redisEnabled: redisQueueEnabled
     }
   });
+}
+
+async function getLeadNotes(req, res) {
+  const lead = await Lead.findById(req.params.id).select("_id");
+  if (!lead) return res.status(404).json({ error: "Lead not found" });
+
+  const notes = await LeadNote.find({ leadId: lead._id }).sort({ createdAt: -1 }).lean();
+  res.json(notes);
+}
+
+async function createLeadNote(req, res) {
+  const lead = await Lead.findById(req.params.id);
+  if (!lead) return res.status(404).json({ error: "Lead not found" });
+
+  const body = String(req.body.body || "").trim();
+  if (!body) return res.status(400).json({ error: "Note body is required" });
+
+  const note = await LeadNote.create({
+    leadId: lead._id,
+    authorName: String(req.body.authorName || "Operator View").trim() || "Operator View",
+    body
+  });
+
+  await logActivity("lead_note_created", { noteId: String(note._id) }, lead._id);
+  res.status(201).json(note);
 }
 
 async function updateLead(req, res) {
@@ -135,7 +165,10 @@ async function deleteLead(req, res) {
     Message.deleteMany({ leadId: lead._id }),
     WorkflowRun.deleteMany({ leadId: lead._id }),
     ScheduledJob.deleteMany({ leadId: lead._id }),
-    ActivityLog.deleteMany({ leadId: lead._id })
+    ActivityLog.deleteMany({ leadId: lead._id }),
+    LeadNote.deleteMany({ leadId: lead._id }),
+    Meeting.deleteMany({ leadId: lead._id }),
+    Notification.deleteMany({ leadId: lead._id })
   ]);
 
   await lead.deleteOne();
@@ -148,6 +181,8 @@ module.exports = {
   uploadLeadsCsv,
   getLeads,
   getLeadById,
+  getLeadNotes,
+  createLeadNote,
   updateLead,
   deleteLead
 };

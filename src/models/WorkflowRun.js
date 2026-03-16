@@ -17,7 +17,10 @@ const WorkflowRunSchema = new mongoose.Schema(
       template2DelayUnit: { type: String, enum: ["minutes", "hours", "days"], default: "hours" },
       template3DelayValue: { type: Number, default: 48 },
       template3DelayUnit: { type: String, enum: ["minutes", "hours", "days"], default: "hours" },
-      membershipTemplate: { type: String, default: "membership_application_template" }
+      membershipTemplate: { type: String, default: "membership_application_template" },
+      applicationSubmittedTemplate: { type: String, default: "whatsapp_automation_request_info" },
+      meetingTemplate: { type: String, default: "meeting_booking_template" },
+      meetingReminderTemplate: { type: String, default: "meeting_reminder_template" }
     },
     currentStepIndex: { type: Number, default: 0 },
     state: {

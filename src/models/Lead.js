@@ -12,12 +12,22 @@ const LeadSchema = new mongoose.Schema(
     score: { type: Number, default: 0 },
     stage: {
       type: String,
-      enum: ["application", "conversation", "onboarding", null],
+      enum: ["application", "conversation", "meeting_requested", "meeting_scheduled", "onboarding", null],
       default: null
     },
     source: { type: String, default: "csv_upload" },
     customFields: { type: mongoose.Schema.Types.Mixed, default: {} },
     optOut: { type: Boolean, default: false },
+    automationState: {
+      autoWorkflowDisabled: { type: Boolean, default: false },
+      stoppedAt: { type: Date, default: null },
+      reason: { type: String, default: null },
+      completedTemplate: { type: String, default: null },
+      lastPostWorkflowAutoReplyAt: { type: Date, default: null },
+      lastPostWorkflowAutoReplyType: { type: String, default: null },
+      zoomLinkSentAt: { type: Date, default: null },
+      pendingZoomLinkFor: { type: Date, default: null }
+    },
     tags: [{ type: String }],
     scoreBreakdown: [
       {

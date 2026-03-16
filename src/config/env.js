@@ -17,7 +17,21 @@ function cleanText(value, fallback = "") {
   return String(value).trim().replace(/^["']|["']$/g, "");
 }
 
-const appBaseUrl = cleanText(process.env.APP_BASE_URL, "http://localhost:3000");
+function parseJsonObject(value, fallback = {}) {
+  const normalized = cleanText(value, "");
+  if (!normalized) return fallback;
+  try {
+    const parsed = JSON.parse(normalized);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+const appBaseUrl = cleanText(process.env.APP_BASE_URL, "http://localhost:3000/bni").replace(
+  /\/+$/,
+  ""
+);
 
 const env = {
   port: Number(process.env.PORT || 5000),
@@ -36,8 +50,13 @@ const env = {
     24 * 60 * 60 * 1000
   ),
   metaApiTimeoutMs: toPositiveNumber(process.env.META_API_TIMEOUT_MS, 20000),
+  whatsappTemplateMediaIds: parseJsonObject(process.env.WHATSAPP_TEMPLATE_MEDIA_IDS, {}),
+  whatsappTemplateMediaLinks: parseJsonObject(process.env.WHATSAPP_TEMPLATE_MEDIA_LINKS, {}),
   appBaseUrl,
-  membershipLink: cleanText(process.env.MEMBERSHIP_LINK, `${appBaseUrl}/apply`),
+  membershipLink: cleanText(process.env.MEMBERSHIP_LINK, `${appBaseUrl}/apply`).replace(
+    /\/+$/,
+    ""
+  ),
   zoomMeetingLink: cleanText(process.env.ZOOM_MEETING_LINK, "")
 };
 

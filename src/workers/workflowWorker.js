@@ -16,7 +16,7 @@ async function startWorker() {
   const worker = new Worker(
     WORKFLOW_QUEUE,
     async (job) => {
-      await processScheduledJob(job.name, job.data.leadId, job.data.runId);
+      await processScheduledJob(job.name, job.data.leadId, job.data.runId, job.data.payload || null);
       await ScheduledJob.deleteOne({ bullJobId: job.id });
     },
     { connection }

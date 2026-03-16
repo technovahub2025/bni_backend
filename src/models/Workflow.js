@@ -28,7 +28,13 @@ const ReplyWorkflowStepSchema = new mongoose.Schema(
     },
     triggerValue: { type: String, default: "" },
     nextTemplate: { type: String, default: "" },
-    nextTemplateVariables: { type: [TemplateVariableBindingSchema], default: [] }
+    nextTemplateVariables: { type: [TemplateVariableBindingSchema], default: [] },
+    followUpDelayValue: { type: Number, default: 0 },
+    followUpDelayUnit: { type: String, enum: ["minutes", "hours", "days"], default: "minutes" },
+    followUpMessage: { type: String, default: "" },
+    finalNoReplyDelayValue: { type: Number, default: 0 },
+    finalNoReplyDelayUnit: { type: String, enum: ["minutes", "hours", "days"], default: "minutes" },
+    finalNoReplyMessage: { type: String, default: "" }
   },
   { _id: false }
 );
@@ -52,6 +58,8 @@ const WorkflowSchema = new mongoose.Schema(
       template3DelayUnit: { type: String, enum: ["minutes", "hours", "days"], default: "hours" },
       membershipTemplate: { type: String, default: "membership_application_template" },
       applicationSubmittedTemplate: { type: String, default: "whatsapp_automation_request_info" },
+      meetingTemplate: { type: String, default: "meeting_booking_template" },
+      meetingReminderTemplate: { type: String, default: "meeting_reminder_template" },
       replyKeywords: [{ type: String }],
       normalReplyScore: { type: Number, default: 20 },
       keywordReplyScore: { type: Number, default: 50 }

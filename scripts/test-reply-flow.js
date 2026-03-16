@@ -44,6 +44,28 @@ function createRunStore() {
     };
   }
 
+  function queryForRuns(runList) {
+    return {
+      sort(sortSpec = {}) {
+        const entries = [...runList];
+        const [field, direction] = Object.entries(sortSpec)[0] || ["createdAt", -1];
+        entries.sort((a, b) => {
+          const aValue = a?.[field];
+          const bValue = b?.[field];
+          if (aValue === bValue) return 0;
+          if (aValue == null) return 1;
+          if (bValue == null) return -1;
+          const comparison = aValue > bValue ? 1 : -1;
+          return direction >= 0 ? comparison : -comparison;
+        });
+        return Promise.resolve(entries);
+      },
+      then(resolve, reject) {
+        return Promise.resolve([...runList]).then(resolve, reject);
+      }
+    };
+  }
+
   class RunDoc {
     constructor(data) {
       Object.assign(this, data);
@@ -58,6 +80,12 @@ function createRunStore() {
   return {
     runs,
     model: {
+      find(query) {
+        const matches = runs.filter(
+          (run) => String(run.leadId) === String(query.leadId) && run.state === query.state
+        );
+        return queryForRuns(matches);
+      },
       findOne(query) {
         const matches = runs
           .filter((run) => String(run.leadId) === String(query.leadId) && run.state === query.state)
@@ -128,6 +156,15 @@ function createLeadStore() {
 function createMessageStore() {
   const messages = [];
 
+  function queryForMessage(message) {
+    return {
+      lean: async () => (message ? { ...message } : null),
+      then(resolve, reject) {
+        return Promise.resolve(message).then(resolve, reject);
+      }
+    };
+  }
+
   return {
     messages,
     model: {
@@ -139,8 +176,61 @@ function createMessageStore() {
       async exists() {
         return false;
       },
+      findOne(query) {
+        const message =
+          messages.find((item) => String(item.providerMessageId || "") === String(query.providerMessageId || "")) ||
+          null;
+        return queryForMessage(message);
+      },
       async findOneAndUpdate() {
         return null;
+      }
+    }
+  };
+}
+
+function createMeetingStore() {
+  const meetings = [];
+
+  function queryForMeeting(meeting) {
+    return {
+      sort() {
+        return Promise.resolve(meeting);
+      },
+      then(resolve, reject) {
+        return Promise.resolve(meeting).then(resolve, reject);
+      }
+    };
+  }
+
+  return {
+    meetings,
+    model: {
+      findOne(query) {
+        const meeting =
+          meetings
+            .filter(
+              (item) =>
+                String(item.leadId) === String(query.leadId) &&
+                Array.isArray(query.status?.$in) &&
+                query.status.$in.includes(item.status)
+            )
+            .sort((a, b) => b.createdAt - a.createdAt)[0] || null;
+        return queryForMeeting(meeting);
+      },
+      async create(data) {
+        const meeting = {
+          _id: `meeting_${meetings.length + 1}`,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          ...data,
+          async save() {
+            this.updatedAt = new Date();
+            return this;
+          }
+        };
+        meetings.push(meeting);
+        return meeting;
       }
     }
   };
@@ -149,6 +239,7 @@ function createMessageStore() {
 function buildHarness({ steps, preloadedLead = null }) {
   const leadStore = createLeadStore();
   const messageStore = createMessageStore();
+  const meetingStore = createMeetingStore();
 
   const workflow = {
     _id: "workflow_1",
@@ -191,6 +282,12 @@ function buildHarness({ steps, preloadedLead = null }) {
       })
   });
   setMock("src/models/WorkflowRun.js", runStore.model);
+  setMock("src/models/Meeting.js", meetingStore.model);
+  setMock("src/models/Notification.js", {
+    async create(data) {
+      return { _id: `notification_${Date.now()}`, ...data };
+    }
+  });
   setMock("src/models/ScheduledJob.js", {
     find: async () => scheduledJobs,
     deleteMany: async () => ({ deletedCount: scheduledJobs.length }),
@@ -215,6 +312,10 @@ function buildHarness({ steps, preloadedLead = null }) {
     sendTemplateMessage: async ({ templateName, templateParams }) => {
       sentTemplates.push({ templateName, templateParams });
       return { _id: `msg_${sentTemplates.length}`, templateName };
+    },
+    sendTextMessage: async ({ body }) => {
+      sentTemplates.push({ templateName: "__text__", templateParams: [body] });
+      return { _id: `msg_${sentTemplates.length}`, body };
     }
   });
   setMock("src/services/logService.js", {
@@ -323,7 +424,7 @@ async function runExactReplyFlowTest() {
     ]
   });
 
-  await harness.workflowService.handleInboundReply(harness.lead, { body: "anything", buttonPayload: "" });
+  await harness.workflowService.handleInboundReply(harness.lead, { body: "hello", buttonPayload: "" });
   await harness.workflowService.handleInboundReply(harness.lead, { body: "apply now", buttonPayload: "" });
 
   assert.deepStrictEqual(
@@ -351,7 +452,7 @@ async function runMembershipLinkFallbackTest() {
     ]
   });
 
-  await harness.workflowService.handleInboundReply(harness.lead, { body: "start", buttonPayload: "" });
+  await harness.workflowService.handleInboundReply(harness.lead, { body: "hello", buttonPayload: "" });
   await harness.workflowService.handleInboundReply(harness.lead, {
     body: "Fill Application Form",
     buttonPayload: "FILL_FORM"
@@ -600,9 +701,9 @@ async function runMeetingFlowSequenceTest() {
   assert.strictEqual(harness.runs[0].state, "running", "The run should stay active while waiting for the slot selection.");
 
   await harness.workflowService.handleInboundReply(harness.lead, {
-    body: "06:00 PM",
-    buttonPayload: "06:00 PM",
-    selectedMeetingTime: "06:00 PM",
+    body: "2026-03-17 06:00 PM",
+    buttonPayload: "2026-03-17 06:00 PM",
+    selectedMeetingTime: "2026-03-17 06:00 PM",
     isFlowReply: true
   });
 
@@ -610,10 +711,10 @@ async function runMeetingFlowSequenceTest() {
   assert.ok(zoomTemplateSend, "Selecting a slot should send the nexion_zoom_link template.");
   assert.deepStrictEqual(
     zoomTemplateSend.templateParams,
-    ["06:00 PM", "https://zoom.us/j/1234567890?pwd=dummy-demo-link"],
+    ["2026-03-17 06:00 PM", "https://zoom.us/j/1234567890?pwd=dummy-demo-link"],
     "The zoom template should receive the selected meeting time first and the zoom link second."
   );
-  assert.strictEqual(harness.runs[0].state, "running", "The workflow should remain active because another branch can still be matched later.");
+  assert.strictEqual(harness.runs[0].state, "completed", "The workflow should complete after sending the terminal zoom-link template.");
 }
 
 async function main() {

@@ -4,7 +4,7 @@ const { sendTemplateMessage } = require("../services/whatsappService");
 const { logActivity } = require("../services/logService");
 
 async function sendMessage(req, res) {
-  const { leadId, phone, templateName, bodyFallback, templateParams } = req.body;
+  const { leadId, phone, templateName, bodyFallback, templateParams, mediaHeaderLink } = req.body;
   if (!templateName || (!leadId && !phone)) {
     return res.status(400).json({ error: "templateName and leadId/phone are required" });
   }
@@ -55,7 +55,8 @@ async function sendMessage(req, res) {
     lead,
     templateName,
     bodyFallback,
-    templateParams: sanitizedParams
+    templateParams: sanitizedParams,
+    mediaHeaderLink: String(mediaHeaderLink || "").trim()
   });
   await logActivity("manual_send", { templateName }, lead._id);
   res.json(message);

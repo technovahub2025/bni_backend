@@ -1,6 +1,6 @@
 const WorkspaceSettings = require("../models/WorkspaceSettings");
 const Workflow = require("../models/Workflow");
-const Message = require("../models/Message");
+const Notification = require("../models/Notification");
 const env = require("../config/env");
 const { DEFAULT_TEMPLATE_CONFIG } = require("../services/workflowService");
 
@@ -78,7 +78,7 @@ async function ensureWorkspaceSettings() {
 async function getWorkspaceSettings(req, res) {
   const [settings, recentInboxCount] = await Promise.all([
     ensureWorkspaceSettings(),
-    Message.countDocuments({ direction: "inbound" })
+    Notification.countDocuments({ readAt: null })
   ]);
 
   const operatorName = settings.operator?.name || "Operator View";
